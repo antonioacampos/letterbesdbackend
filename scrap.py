@@ -16,8 +16,19 @@ password = os.getenv("PGPASSWORD")
 host = os.getenv("PGHOST")
 port = os.getenv("PGPORT")
 
-required_env_vars = ["DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT"]
-missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+required_env_vars = [
+    ("PGDATABASE", "DB_NAME"),
+    ("PGUSER", "DB_USER"),
+    ("PGPASSWORD", "DB_PASSWORD"),
+    ("PGHOST", "DB_HOST"),
+    ("PGPORT", "DB_PORT")
+]
+
+missing_vars = []
+for pg_var, db_var in required_env_vars:
+    if not (os.getenv(pg_var) or os.getenv(db_var)):
+        missing_vars.append(f"{pg_var}/{db_var}")
+
 if missing_vars:
     raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
