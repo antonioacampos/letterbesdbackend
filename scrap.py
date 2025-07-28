@@ -10,11 +10,11 @@ import time
 
 load_dotenv()
 
-dbname = os.getenv("DB_NAME")
-user = os.getenv("DB_USER")
-password = os.getenv("DB_PASSWORD")
-host = os.getenv("DB_HOST")
-port = os.getenv("DB_PORT")
+dbname = os.getenv("PGDATABASE")
+user = os.getenv("PGUSER")
+password = os.getenv("PGPASSWORD")
+host = os.getenv("PGHOST")
+port = os.getenv("PGPORT")
 
 required_env_vars = ["DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT"]
 missing_vars = [var for var in required_env_vars if not os.getenv(var)]
