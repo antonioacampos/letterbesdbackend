@@ -16,15 +16,15 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app, origins=["https://letterbesdfront.vercel.app"])
+CORS(app)
 
 load_dotenv()
 
-dbname = os.getenv("DB_NAME")
-user = os.getenv("DB_USER")
-password = os.getenv("DB_PASSWORD")
-host = os.getenv("DB_HOST")
-port = os.getenv("DB_PORT")
+dbname = os.getenv("PGDATABASE")
+user = os.getenv("PGUSER")
+password = os.getenv("PGPASSWORD")
+host = os.getenv("PGHOST")
+port = os.getenv("PGPORT")
 
 def get_db_connection():
     return psycopg2.connect(
