@@ -51,27 +51,6 @@ def test_db_connection():
         logger.error(f"Erro na conexão com banco: {str(e)}")
         return jsonify({"status": "erro", "mensagem": str(e)}), 500
 
-@app.route('/api/recomendacoes/<usuario>')
-def obter_recomendacoes(usuario):
-    logger.info(f"Requisição para recomendações do usuário: {usuario}")
-    try:
-        recomendacoes = gerar_recomendacoes(usuario)
-        logger.info(f"Recomendações geradas: {recomendacoes}")
-        return jsonify(recomendacoes)
-    except Exception as e:
-        logger.error(f"Erro na rota de recomendações: {str(e)}")
-        return jsonify({
-            "error": str(e),
-            "status": "error",
-            "message": "Erro ao processar a requisição",
-            "recomendacoes": {},
-            "metadata": {
-                "total_usuarios": 0,
-                "total_filmes": 0,
-                "filmes_nao_vistos": 0,
-                "total_recomendacoes": 0
-            }
-        }), 500
 def adicionar_usuario(usuario):
     logger.info(f"Tentando adicionar usuário {usuario} ao banco de dados")
     if not verify_letterboxd_user(usuario):
