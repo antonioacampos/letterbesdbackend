@@ -1,16 +1,19 @@
+import os
+import logging
 import pandas as pd
 import numpy as np
 from flask import Flask, jsonify
 from flask_cors import CORS
 import psycopg2
-from dotenv import load_dotenv
-import os
+from scrap import scrap, verify_letterboxd_user
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics import silhouette_score
-import logging
-from scrap import scrap, verify_letterboxd_user
+from dotenv import load_dotenv
+
+# Carrega .env no local
+load_dotenv()
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -18,8 +21,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-load_dotenv()
-
+# Variáveis de ambiente para banco
 dbname = os.getenv("PGDATABASE")
 user = os.getenv("PGUSER")
 password = os.getenv("PGPASSWORD")
@@ -35,6 +37,41 @@ def get_db_connection():
         port=port
     )
 
+@app.route('/ping')
+def ping():
+    return jsonify({"message": "pong"}), 200
+
+@app.route('/test-db-connection')
+def test_db_connection():
+    try:
+        conn = get_db_connection()
+        conn.close()
+        return jsonify({"status": "conectado com sucesso"}), 200
+    except Exception as e:
+        logger.error(f"Erro na conexão com banco: {str(e)}")
+        return jsonify({"status": "erro", "mensagem": str(e)}), 500
+
+@app.route('/api/recomendacoes/<usuario>')
+def obter_recomendacoes(usuario):
+    logger.info(f"Requisição para recomendações do usuário: {usuario}")
+    try:
+        recomendacoes = gerar_recomendacoes(usuario)
+        logger.info(f"Recomendações geradas: {recomendacoes}")
+        return jsonify(recomendacoes)
+    except Exception as e:
+        logger.error(f"Erro na rota de recomendações: {str(e)}")
+        return jsonify({
+            "error": str(e),
+            "status": "error",
+            "message": "Erro ao processar a requisição",
+            "recomendacoes": {},
+            "metadata": {
+                "total_usuarios": 0,
+                "total_filmes": 0,
+                "filmes_nao_vistos": 0,
+                "total_recomendacoes": 0
+            }
+        }), 500
 def adicionar_usuario(usuario):
     logger.info(f"Tentando adicionar usuário {usuario} ao banco de dados")
     if not verify_letterboxd_user(usuario):
