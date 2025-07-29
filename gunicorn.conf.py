@@ -7,17 +7,17 @@ bind = "0.0.0.0:" + os.environ.get("PORT", "5000")
 backlog = 2048
 
 # Worker processes
-workers = multiprocessing.cpu_count() * 2 + 1
+workers = 2  # Reduced for Railway memory constraints
 worker_class = "sync"
-worker_connections = 1000
-max_requests = 1000
-max_requests_jitter = 50
-preload_app = True
+worker_connections = 100
+max_requests = 100
+max_requests_jitter = 10
+preload_app = False  # Disabled to reduce memory usage
 
 # Timeout settings
-timeout = 30
+timeout = 20
 keepalive = 2
-graceful_timeout = 30
+graceful_timeout = 20
 
 # Logging
 accesslog = "-"
