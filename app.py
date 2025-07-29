@@ -34,9 +34,9 @@ host = os.getenv("PGHOST")
 port = os.getenv("PGPORT")
 
 # Timeout configuration
-REQUEST_TIMEOUT = 15  # seconds - reduced for Railway
-MAX_USERS_FOR_CLUSTERING = 500
-MAX_MOVIES_FOR_PROCESSING = 500  # Further reduced to prevent memory issues
+REQUEST_TIMEOUT = 10  # seconds - even more aggressive for Railway
+MAX_USERS_FOR_CLUSTERING = 100
+MAX_MOVIES_FOR_PROCESSING = 50  # Much smaller dataset
 
 # Rate limiting
 request_counts = defaultdict(list)
@@ -191,7 +191,7 @@ def get_user_data_efficiently(usuario_alvo):
     try:
         conn = get_db_connection()
         
-        # First check if user exists
+        # First check if user exists - with timeout
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM users WHERE username = %s", (usuario_alvo,))
         user_exists = cursor.fetchone() is not None
@@ -200,27 +200,29 @@ def get_user_data_efficiently(usuario_alvo):
             conn.close()
             return None, "user_not_found"
         
-        # Get user's watched movies
+        # Get user's watched movies - with very strict limit
         query_user = """
         SELECT m.title, r.rating
         FROM ratings r
         JOIN users u ON r.user_id = u.id
         JOIN movies m ON r.movie_id = m.id
         WHERE u.username = %s
+        ORDER BY r.rating DESC
+        LIMIT 30
         """
         df_user = pd.read_sql(query_user, conn, params=(usuario_alvo,))
         
-        # Get top popular movies (simplified approach)
+        # Get only top 10 popular movies - minimal dataset
         query_popular = """
-        SELECT m.title, AVG(r.rating) as avg_rating, COUNT(r.rating) as num_ratings
+        SELECT m.title, AVG(r.rating) as avg_rating
         FROM ratings r
         JOIN movies m ON r.movie_id = m.id
         GROUP BY m.title
-        HAVING COUNT(r.rating) >= 3
-        ORDER BY COUNT(r.rating) DESC, AVG(r.rating) DESC
-        LIMIT %s
+        HAVING COUNT(r.rating) >= 2
+        ORDER BY AVG(r.rating) DESC
+        LIMIT 10
         """
-        df_popular = pd.read_sql(query_popular, conn, params=(MAX_MOVIES_FOR_PROCESSING,))
+        df_popular = pd.read_sql(query_popular, conn, params=(10,))
         
         conn.close()
         
@@ -251,25 +253,29 @@ def simple_recommendation_algorithm(data_dict, usuario_alvo):
     
     recomendacoes = []
     
-    # Recommend from popular movies that user hasn't watched
+    # Recommend from popular movies that user hasn't watched - limit to top 10
+    count = 0
     for _, row in popular_movies.iterrows():
+        if count >= 10:  # Very limited recommendations
+            break
+            
         title = row['title']
         avg_rating = row['avg_rating']
-        num_ratings = row['num_ratings']
         
         if title not in user_watched:
-            # Simple scoring: rating + popularity bonus
-            score = float(avg_rating) * (1 + 0.1 * min(num_ratings / 10, 2))
+            # Very simple scoring
+            score = float(avg_rating)
             
-            # Bonus for movies with similar rating to user's average
+            # Small bonus for movies with similar rating
             rating_diff = abs(avg_rating - user_avg)
             if rating_diff < 1.0:
-                score *= 1.15
+                score *= 1.05
             
             recomendacoes.append({
                 'filme': title,
                 'score': score
             })
+            count += 1
     
     return recomendacoes
 
@@ -313,13 +319,18 @@ def gerar_recomendacoes(usuario_alvo):
             data_dict = user_cache[usuario_alvo]['data']
             status = "success"
         else:
-            # Get data efficiently
-            data_dict, status = get_user_data_efficiently(usuario_alvo)
-            if status == "success":
-                user_cache[usuario_alvo] = {
-                    'data': data_dict,
-                    'timestamp': current_time
-                }
+            # Try ultra-fast approach first
+            try:
+                data_dict, status = get_user_data_efficiently(usuario_alvo)
+                if status == "success":
+                    user_cache[usuario_alvo] = {
+                        'data': data_dict,
+                        'timestamp': current_time
+                    }
+            except Exception as e:
+                logger.error(f"Erro na busca de dados: {str(e)}")
+                # Return fallback immediately if database query fails
+                return quick_fallback()
         
         if status == "user_not_found":
             logger.info(f"Usuário {usuario_alvo} não encontrado no banco de dados. Tentando adicionar...")
@@ -380,7 +391,7 @@ def gerar_recomendacoes(usuario_alvo):
         
         # Sort and limit recommendations
         recomendacoes.sort(key=lambda x: x['score'], reverse=True)
-        recomendacoes_formatadas = {rec['filme']: rec['score'] for rec in recomendacoes[:10]}
+        recomendacoes_formatadas = {rec['filme']: rec['score'] for rec in recomendacoes[:5]}  # Only top 5
         
         processing_time = time.time() - start_time
         logger.info(f"Recomendações geradas em {processing_time:.2f} segundos")
