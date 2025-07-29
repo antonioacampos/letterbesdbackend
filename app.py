@@ -2,7 +2,7 @@ import os
 import logging
 import pandas as pd
 import numpy as np
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import psycopg2
 from scrap import scrap, verify_letterboxd_user
@@ -11,6 +11,10 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics import silhouette_score
 from dotenv import load_dotenv
+import time
+import signal
+from functools import wraps
+from collections import defaultdict
 
 # Carrega .env no local
 load_dotenv()
@@ -28,6 +32,35 @@ password = os.getenv("PGPASSWORD")
 host = os.getenv("PGHOST")
 port = os.getenv("PGPORT")
 
+# Timeout configuration
+REQUEST_TIMEOUT = 25  # seconds
+MAX_USERS_FOR_CLUSTERING = 1000
+MAX_MOVIES_FOR_PROCESSING = 1000  # Reduced to prevent memory issues
+
+# Rate limiting
+request_counts = defaultdict(list)
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX_REQUESTS = 10  # max requests per window
+
+def timeout_handler(signum, frame):
+    raise TimeoutError("Operation timed out")
+
+def timeout_decorator(seconds):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Set the signal handler
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(seconds)
+            try:
+                result = func(*args, **kwargs)
+                return result
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+        return wrapper
+    return decorator
+
 def get_db_connection():
     return psycopg2.connect(
         dbname=dbname,
@@ -41,6 +74,28 @@ def get_db_connection():
 def ping():
     return jsonify({"message": "pong"}), 200
 
+@app.route('/health')
+def health():
+    try:
+        # Test database connection
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        conn.close()
+        
+        return jsonify({
+            "status": "healthy",
+            "database": "connected",
+            "timestamp": time.time()
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e),
+            "timestamp": time.time()
+        }), 500
+
 @app.route('/test-db-connection')
 def test_db_connection():
     try:
@@ -53,6 +108,21 @@ def test_db_connection():
 
 def adicionar_usuario(usuario):
     logger.info(f"Tentando adicionar usuário {usuario} ao banco de dados")
+    
+    # Check if user already exists first
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id FROM users WHERE username = %s", (usuario,))
+            if cursor.fetchone():
+                logger.info(f"Usuário {usuario} já existe no banco de dados")
+                conn.close()
+                return True
+        conn.close()
+    except Exception as e:
+        logger.error(f"Erro ao verificar usuário {usuario}: {str(e)}")
+        return False
+    
     if not verify_letterboxd_user(usuario):
         logger.error(f"Usuário {usuario} não existe no Letterboxd")
         return False
@@ -67,44 +137,131 @@ def adicionar_usuario(usuario):
         logger.error(f"Erro ao adicionar usuário {usuario}: {str(e)}")
         return False
 
-def gerar_recomendacoes(usuario_alvo):
-    logger.info(f"Iniciando geração de recomendações para usuário: {usuario_alvo}")
+def get_user_data_efficiently(usuario_alvo):
+    """Get user data more efficiently with limits"""
     try:
         conn = get_db_connection()
+        
+        # First check if user exists
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE username = %s", (usuario_alvo,))
+        user_exists = cursor.fetchone() is not None
+        
+        if not user_exists:
+            conn.close()
+            return None, "user_not_found"
+        
+        # Get user's data
         query = """
         SELECT u.username, m.title, r.rating
         FROM ratings r
         JOIN users u ON r.user_id = u.id
         JOIN movies m ON r.movie_id = m.id
+        WHERE u.username = %s
         """
-        logger.info("Executando query para buscar avaliações")
-        df = pd.read_sql(query, conn)
+        df_user = pd.read_sql(query, conn, params=(usuario_alvo,))
+        
+        # Get popular movies data (more efficient than all users)
+        query_popular = """
+        SELECT m.title, AVG(r.rating) as avg_rating, COUNT(r.rating) as num_ratings
+        FROM ratings r
+        JOIN movies m ON r.movie_id = m.id
+        GROUP BY m.title
+        HAVING COUNT(r.rating) >= 2
+        ORDER BY COUNT(r.rating) DESC
+        LIMIT %s
+        """
+        df_popular = pd.read_sql(query_popular, conn, params=(MAX_MOVIES_FOR_PROCESSING,))
+        
         conn.close()
-        logger.info(f"Total de registros encontrados: {len(df)}")
+        
+        # Create a simplified dataset for recommendations
+        if len(df_user) == 0:
+            return None, "insufficient_data"
+        
+        # Create recommendations based on popular movies
+        recommendations_data = []
+        for _, row in df_popular.iterrows():
+            title = row['title']
+            avg_rating = row['avg_rating']
+            num_ratings = row['num_ratings']
+            
+            # Create synthetic user ratings for popular movies
+            recommendations_data.extend([
+                {'username': 'popular', 'title': title, 'rating': avg_rating}
+            ])
+        
+        # Combine user data with popular movies
+        df_combined = pd.concat([
+            df_user,
+            pd.DataFrame(recommendations_data)
+        ], ignore_index=True)
+        
+        if len(df_combined) < 5:
+            return None, "insufficient_data"
+            
+        return df_combined, "success"
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar dados: {str(e)}")
+        return None, "error"
 
-        if len(df) < 2:
-            logger.warning("Dados insuficientes para gerar recomendações")
-            return {
-                "error": "Não há dados suficientes para gerar recomendações",
-                "status": "insufficient_data",
-                "message": "É necessário ter pelo menos 2 usuários com avaliações para gerar recomendações",
-                "recomendacoes": {},
-                "metadata": {
-                    "total_usuarios": 0,
-                    "total_filmes": 0,
-                    "filmes_nao_vistos": 0,
-                    "total_recomendacoes": 0
-                }
-            }
+def simple_recommendation_algorithm(df, usuario_alvo, filmes_nao_vistos):
+    """Simplified recommendation algorithm for better performance"""
+    logger.info("Usando algoritmo simplificado de recomendação")
+    
+    recomendacoes = []
+    
+    # Get user's average rating
+    user_ratings = df[df['username'] == usuario_alvo]['rating']
+    user_avg = user_ratings.mean() if len(user_ratings) > 0 else 3.0
+    
+    # Get popular movies data
+    popular_movies = df[df['username'] == 'popular']
+    
+    for filme in filmes_nao_vistos:
+        if filme in df['title'].values:
+            # Get ratings for this movie from popular data
+            movie_data = popular_movies[popular_movies['title'] == filme]
+            
+            if len(movie_data) > 0:
+                avg_rating = movie_data['rating'].iloc[0]
+                
+                # Simple scoring based on popularity and rating
+                score = float(avg_rating) * 1.1  # Boost popular movies
+                
+                # Bonus for movies with similar rating to user's average
+                rating_diff = abs(avg_rating - user_avg)
+                if rating_diff < 1.0:
+                    score *= 1.2
+                
+                recomendacoes.append({
+                    'filme': filme,
+                    'score': score
+                })
+            else:
+                # Fallback for movies not in popular data
+                movie_ratings = df[df['title'] == filme]['rating']
+                if len(movie_ratings) > 0:
+                    avg_rating = movie_ratings.mean()
+                    score = float(avg_rating)
+                    recomendacoes.append({
+                        'filme': filme,
+                        'score': score
+                    })
+    
+    return recomendacoes
 
-        logger.info("Criando matriz de usuário-filme")
-        rating_matrix = df.pivot_table(
-            index='username',
-            columns='title',
-            values='rating'
-        ).fillna(0)
-
-        if usuario_alvo not in rating_matrix.index:
+@timeout_decorator(REQUEST_TIMEOUT)
+def gerar_recomendacoes(usuario_alvo):
+    logger.info(f"Iniciando geração de recomendações para usuário: {usuario_alvo}")
+    start_time = time.time()
+    
+    try:
+        # Get data efficiently
+        df, status = get_user_data_efficiently(usuario_alvo)
+        
+        if status == "user_not_found":
             logger.info(f"Usuário {usuario_alvo} não encontrado no banco de dados. Tentando adicionar...")
             if adicionar_usuario(usuario_alvo):
                 logger.info("Usuário adicionado com sucesso. Gerando recomendações...")
@@ -117,127 +274,97 @@ def gerar_recomendacoes(usuario_alvo):
                     "message": "O usuário não foi encontrado no banco de dados ou não existe no Letterboxd. Verifique o nome.",
                     "recomendacoes": {}, 
                     "metadata": {
-                        "total_usuarios": len(rating_matrix) if not rating_matrix.empty else 0,
+                        "total_usuarios": 0,
                         "total_filmes": 0,
                         "filmes_nao_vistos": 0,
-                        "total_recomendacoes": 0
+                        "total_recomendacoes": 0,
+                        "processing_time": time.time() - start_time
                     }
                 }
+        
+        if status == "insufficient_data":
+            return {
+                "error": "Não há dados suficientes para gerar recomendações",
+                "status": "insufficient_data",
+                "message": "É necessário ter pelo menos 10 avaliações para gerar recomendações",
+                "recomendacoes": {},
+                "metadata": {
+                    "total_usuarios": 0,
+                    "total_filmes": 0,
+                    "filmes_nao_vistos": 0,
+                    "total_recomendacoes": 0,
+                    "processing_time": time.time() - start_time
+                }
+            }
+        
+        if status == "error" or df is None:
+            return {
+                "error": "Erro ao buscar dados do banco",
+                "status": "error",
+                "message": "Ocorreu um erro ao buscar dados do banco de dados",
+                "recomendacoes": {},
+                "metadata": {
+                    "total_usuarios": 0,
+                    "total_filmes": 0,
+                    "filmes_nao_vistos": 0,
+                    "total_recomendacoes": 0,
+                    "processing_time": time.time() - start_time
+                }
+            }
 
+        logger.info(f"Total de registros encontrados: {len(df)}")
+        
+        # Get user's movies and unseen movies
         filmes_usuario = df[df['username'] == usuario_alvo]['title'].unique()
         todos_filmes = df['title'].unique()
         filmes_nao_vistos = set(todos_filmes) - set(filmes_usuario)
-
-        if len(rating_matrix) < 4:
-            logger.info("Usando abordagem simples para poucos usuários")
-            recomendacoes = []
-            for filme in filmes_nao_vistos:
-                if filme in rating_matrix.columns:
-                    avaliacoes = df[df['title'] == filme]['rating']
-                    media = avaliacoes.mean()
-                    num_avaliacoes = len(avaliacoes)
-                    if not np.isnan(media):
-                        score = media * (1 + 0.1 * num_avaliacoes)
-                        recomendacoes.append({
-                            'filme': filme,
-                            'score': float(score)
-                        })
-        else:
-            logger.info("Normalizando e reduzindo dimensionalidade")
-            scaler = StandardScaler()
-            rating_matrix_scaled = scaler.fit_transform(rating_matrix)
-
-           
-            n_components = min(30, min(rating_matrix_scaled.shape)-1)
-            if n_components < 1:
-                rating_matrix_reduced = rating_matrix_scaled
-            else:
-                svd = TruncatedSVD(n_components=n_components, random_state=42)
-                rating_matrix_reduced = svd.fit_transform(rating_matrix_scaled)
-
-            sil_scores = []
-            possible_ks = range(2, min(11, len(rating_matrix))) 
-            if not possible_ks:
-                 best_k = 1
-            else:
-                for k in possible_ks:
-                    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-                    labels = kmeans.fit_predict(rating_matrix_reduced)
-                    if len(set(labels)) > 1:
-                        score = silhouette_score(rating_matrix_reduced, labels)
-                        sil_scores.append(score)
-                    else:
-                        sil_scores.append(-1) 
-                best_k = possible_ks[np.argmax(sil_scores)] if sil_scores and max(sil_scores) > -1 else 2
-
-            logger.info(f"Melhor número de clusters: {best_k}")
-            kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=20)
-            clusters = kmeans.fit_predict(rating_matrix_reduced)
-            rating_matrix['cluster'] = clusters
-
-            cluster_usuario = rating_matrix.loc[usuario_alvo, 'cluster']
-            logger.info(f"Usuário {usuario_alvo} está no cluster {cluster_usuario}")
-
-            usuarios_mesmo_cluster = rating_matrix[rating_matrix['cluster'] == cluster_usuario].index
-            logger.info(f"Total de usuários no mesmo cluster: {len(usuarios_mesmo_cluster)}")
-
-            if len(usuarios_mesmo_cluster) < 2:
-                logger.info("Poucos usuários no mesmo cluster, usando todos os usuários")
-                usuarios_mesmo_cluster = rating_matrix.index
-
-            logger.info("Calculando scores de recomendação")
-            recomendacoes = []
-            for filme in filmes_nao_vistos:
-                if filme in rating_matrix.columns:
-                    avaliacoes = df[
-                        (df['title'] == filme) &
-                        (df['username'].isin(usuarios_mesmo_cluster))
-                    ]['rating']
-                    if len(avaliacoes) > 0:
-                        media = avaliacoes.mean()
-                        num_avaliacoes = len(avaliacoes)
-                        if not np.isnan(media):
-                            score = media * (1 + 0.1 * num_avaliacoes)
-                            recomendacoes.append({
-                                'filme': filme,
-                                'score': float(score)
-                            })
-
-            if len(recomendacoes) < 10:
-                logger.info("Adicionando filmes populares para completar recomendações")
-                filmes_populares = []
-                for filme in filmes_nao_vistos:
-                    if filme not in [r['filme'] for r in recomendacoes]:
-                        avaliacoes = df[df['title'] == filme]['rating']
-                        media = avaliacoes.mean()
-                        num_avaliacoes = len(avaliacoes)
-                        if not np.isnan(media):
-                            score = media * (1 + 0.1 * num_avaliacoes)
-                            filmes_populares.append({
-                                'filme': filme,
-                                'score': float(score)
-                            })
-                filmes_populares.sort(key=lambda x: x['score'], reverse=True)
-                novos_populares = [f for f in filmes_populares if f['filme'] not in [r['filme'] for r in recomendacoes]]
-                recomendacoes.extend(novos_populares[:10 - len(recomendacoes)])
-
-
+        
+        logger.info(f"Filmes do usuário: {len(filmes_usuario)}, Filmes não vistos: {len(filmes_nao_vistos)}")
+        
+        # Use simplified algorithm for better performance
+        recomendacoes = simple_recommendation_algorithm(df, usuario_alvo, filmes_nao_vistos)
+        
+        # Sort and limit recommendations
         recomendacoes.sort(key=lambda x: x['score'], reverse=True)
         recomendacoes_formatadas = {rec['filme']: rec['score'] for rec in recomendacoes[:10]}
+        
+        processing_time = time.time() - start_time
+        logger.info(f"Recomendações geradas em {processing_time:.2f} segundos")
+        
+        # Clean up memory
+        del df
+        del recomendacoes
+        
         response = {
             "status": "success",
             "message": "Recomendações geradas com sucesso",
             "recomendacoes": recomendacoes_formatadas,
             "metadata": {
-                "total_usuarios": len(rating_matrix),
+                "total_usuarios": df['username'].nunique() if 'df' in locals() else 0,
                 "total_filmes": len(todos_filmes),
                 "filmes_nao_vistos": len(filmes_nao_vistos),
-                "total_recomendacoes": len(recomendacoes_formatadas) 
+                "total_recomendacoes": len(recomendacoes_formatadas),
+                "processing_time": processing_time
             }
         }
-        logger.info("Recomendações geradas com sucesso")
+        
         return response
 
+    except TimeoutError:
+        logger.error("Timeout ao gerar recomendações")
+        return {
+            "error": "Timeout ao gerar recomendações",
+            "status": "timeout",
+            "message": "A operação demorou muito para ser concluída. Tente novamente.",
+            "recomendacoes": {},
+            "metadata": {
+                "total_usuarios": 0,
+                "total_filmes": 0,
+                "filmes_nao_vistos": 0,
+                "total_recomendacoes": 0,
+                "processing_time": time.time() - start_time
+            }
+        }
     except Exception as e:
         logger.error(f"Erro ao gerar recomendações: {str(e)}")
         return {
@@ -249,13 +376,42 @@ def gerar_recomendacoes(usuario_alvo):
                 "total_usuarios": 0,
                 "total_filmes": 0,
                 "filmes_nao_vistos": 0,
-                "total_recomendacoes": 0
+                "total_recomendacoes": 0,
+                "processing_time": time.time() - start_time
             }
         }
 
 @app.route('/api/recomendacoes/<usuario>')
 def obter_recomendacoes(usuario):
     logger.info(f"Recebida requisição para usuário: {usuario}")
+    
+    # Simple rate limiting
+    current_time = time.time()
+    client_ip = request.remote_addr if hasattr(request, 'remote_addr') else 'unknown'
+    
+    # Clean old requests
+    request_counts[client_ip] = [req_time for req_time in request_counts[client_ip] 
+                                if current_time - req_time < RATE_LIMIT_WINDOW]
+    
+    # Check rate limit
+    if len(request_counts[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
+        return jsonify({
+            "error": "Rate limit exceeded",
+            "status": "rate_limited",
+            "message": "Too many requests. Please try again later.",
+            "recomendacoes": {},
+            "metadata": {
+                "total_usuarios": 0,
+                "total_filmes": 0,
+                "filmes_nao_vistos": 0,
+                "total_recomendacoes": 0,
+                "processing_time": 0
+            }
+        }), 429
+    
+    # Add current request
+    request_counts[client_ip].append(current_time)
+    
     try:
         recomendacoes = gerar_recomendacoes(usuario)
         logger.info(f"Resposta gerada: {recomendacoes}")
@@ -271,7 +427,8 @@ def obter_recomendacoes(usuario):
                 "total_usuarios": 0,
                 "total_filmes": 0,
                 "filmes_nao_vistos": 0,
-                "total_recomendacoes": 0
+                "total_recomendacoes": 0,
+                "processing_time": 0
             }
         }), 500
 

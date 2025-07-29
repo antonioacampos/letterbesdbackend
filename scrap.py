@@ -171,7 +171,7 @@ def verify_letterboxd_user(username: str) -> bool:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=5)
         return response.status_code == 200
     except requests.RequestException:
         return False
@@ -184,14 +184,15 @@ def scrap(cursor, conn, username: str) -> None:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
     watched_movies: List[Tuple[str, Optional[float]]] = []
     page = 1
+    max_pages = 5  # Limit pages to prevent timeout
 
     try:
         print(f"\nIniciando scraping para usuário {username}")
-        while True:
+        while page <= max_pages:
             url = f"{base_url}{page}/"
             print(f"Acessando página {page}: {url}")
             try:
-                response = requests.get(url, headers=headers, timeout=10)
+                response = requests.get(url, headers=headers, timeout=5)
                 response.raise_for_status()
             except requests.RequestException as e:
                 print(f"Erro ao acessar página {page} para usuário {username}: {str(e)}", file=sys.stderr)
@@ -221,7 +222,7 @@ def scrap(cursor, conn, username: str) -> None:
                     continue
 
             page += 1
-            time.sleep(1)
+            time.sleep(0.5)  # Reduced sleep time
 
         if not watched_movies:
             raise Exception(f"Nenhum filme encontrado para o usuário {username}")
