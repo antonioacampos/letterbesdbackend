@@ -75,10 +75,13 @@ def main():
     except Exception as e:
         print(f"❌ Erro: {str(e)}")
     
-    # Teste 5: Recommendations (should be fast now)
+    # Teste 5: Debug user data
+    test_endpoint(f"{base_url}/api/debug/gutomp4", "Debug User Data (gutomp4)")
+    
+    # Teste 6: Recommendations (should be fast now)
     test_endpoint(f"{base_url}/api/recomendacoes/gutomp4", "Recommendations (gutomp4)")
     
-    # Teste 6: Another user (should return fallback)
+    # Teste 7: Another user (should return fallback)
     test_endpoint(f"{base_url}/api/recomendacoes/filmaria", "Recommendations (filmaria - fallback)")
     
     print(f"\n✅ Testes concluídos!")
