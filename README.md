@@ -81,14 +81,20 @@ This will test all endpoints and measure response times.
 ## 🔧 **Usage Workflow**
 
 ### **For Fast Recommendations:**
-1. **Cache the user first**: `GET /api/cache/<username>`
-2. **Get recommendations**: `GET /api/recomendacoes/<username>`
-3. **Response time**: < 1 second
+1. **Preload common users**: `GET /api/preload` (cacheia usuários comuns)
+2. **Cache specific user**: `GET /api/cache/<username>`
+3. **Get recommendations**: `GET /api/recomendacoes/<username>`
+4. **Response time**: < 1 second
 
 ### **For Immediate Response:**
 1. **Skip caching**: `GET /api/recomendacoes/<username>`
 2. **Gets fallback**: Popular movies immediately
 3. **Response time**: < 0.5 seconds
+
+### **For Debugging:**
+1. **Check user data**: `GET /api/debug/<username>`
+2. **Check memory**: `GET /api/memory`
+3. **Check cache**: `GET /api/cache/<username>`
 
 ## 📈 **Expected Performance**
 

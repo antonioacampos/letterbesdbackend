@@ -28,9 +28,9 @@ host = os.getenv("PGHOST")
 port = os.getenv("PGPORT")
 
 # Timeout configuration
-REQUEST_TIMEOUT = 5  # seconds - ultra aggressive for Railway
-MAX_USERS_FOR_CLUSTERING = 50
-MAX_MOVIES_FOR_PROCESSING = 10  # Minimal dataset
+REQUEST_TIMEOUT = 3  # seconds - ultra aggressive for Railway
+MAX_USERS_FOR_CLUSTERING = 20
+MAX_MOVIES_FOR_PROCESSING = 5  # Minimal dataset
 
 # Rate limiting
 request_counts = defaultdict(list)
@@ -202,6 +202,33 @@ def debug_user(usuario):
             "error": str(e)
         }), 500
 
+@app.route('/api/preload')
+def preload_users():
+    """Preload common users into cache"""
+    common_users = ["gutomp4", "filmaria", "martinscorsese", "quentintarantino"]
+    results = []
+    
+    for user in common_users:
+        try:
+            logger.info(f"Preloadando usuário: {user}")
+            data_dict, status = get_user_data_efficiently(user)
+            if status == "success":
+                user_cache[user] = {
+                    'data': data_dict,
+                    'timestamp': time.time()
+                }
+                results.append({"user": user, "status": "success", "movies": len(data_dict['user_movies'])})
+            else:
+                results.append({"user": user, "status": "failed", "reason": status})
+        except Exception as e:
+            results.append({"user": user, "status": "error", "error": str(e)})
+    
+    return jsonify({
+        "status": "completed",
+        "results": results,
+        "cached_users": list(user_cache.keys())
+    })
+
 @app.route('/test-db-connection')
 def test_db_connection():
     try:
@@ -244,20 +271,20 @@ def adicionar_usuario(usuario):
         return False
 
 def get_user_data_efficiently(usuario_alvo):
-    """Get user data using pure SQL - no pandas"""
+    """Get user data with ultra-fast queries and fallback"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # First check if user exists
-        cursor.execute("SELECT id FROM users WHERE username = %s", (usuario_alvo,))
+        # First check if user exists - with timeout
+        cursor.execute("SELECT id FROM users WHERE username = %s LIMIT 1", (usuario_alvo,))
         user_exists = cursor.fetchone() is not None
         
         if not user_exists:
             conn.close()
             return None, "user_not_found"
         
-        # Get user's top rated movies - pure SQL, no pandas
+        # Get user's top rated movies - ultra minimal query
         query_user = """
         SELECT m.title, r.rating
         FROM ratings r
@@ -265,12 +292,12 @@ def get_user_data_efficiently(usuario_alvo):
         JOIN movies m ON r.movie_id = m.id
         WHERE u.username = %s
         ORDER BY r.rating DESC
-        LIMIT 20
+        LIMIT 10
         """
         cursor.execute(query_user, (usuario_alvo,))
         user_movies = cursor.fetchall()
         
-        # Get top 15 popular movies - more options for recommendations
+        # Get only top 5 popular movies - minimal query
         query_popular = """
         SELECT m.title, AVG(r.rating) as avg_rating
         FROM ratings r
@@ -278,7 +305,7 @@ def get_user_data_efficiently(usuario_alvo):
         GROUP BY m.title
         HAVING COUNT(r.rating) >= 2
         ORDER BY AVG(r.rating) DESC
-        LIMIT 15
+        LIMIT 5
         """
         cursor.execute(query_popular)
         popular_movies = cursor.fetchall()
@@ -363,7 +390,7 @@ def gerar_recomendacoes(usuario_alvo):
     
     # Quick fallback for immediate response
     def quick_fallback():
-        return {
+            return {
             "status": "success",
             "message": "Recomendações rápidas geradas (modo de emergência)",
             "recomendacoes": {
@@ -378,7 +405,7 @@ def gerar_recomendacoes(usuario_alvo):
                 "Interstellar": 8.6,
                 "The Departed": 8.5
             },
-            "metadata": {
+                "metadata": {
                 "total_usuarios": 1,
                 "total_filmes": 10,
                 "filmes_nao_vistos": 10,
@@ -388,28 +415,29 @@ def gerar_recomendacoes(usuario_alvo):
             }
         }
     
+    # Ultra-fast user check with timeout
+    def quick_user_check(username):
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM users WHERE username = %s LIMIT 1", (username,))
+            exists = cursor.fetchone() is not None
+            conn.close()
+            return exists
+        except:
+            return False
+    
     try:
-        # Check cache first
+        # Check cache first - if not in cache, return fallback immediately for Railway
         current_time = time.time()
         if usuario_alvo in user_cache and (current_time - user_cache[usuario_alvo]['timestamp']) < CACHE_EXPIRY:
             logger.info(f"Usando dados em cache para usuário: {usuario_alvo}")
             data_dict = user_cache[usuario_alvo]['data']
             status = "success"
         else:
-            # Try to get user data from database
-            logger.info(f"Usuário {usuario_alvo} não está em cache - buscando dados do banco")
-            try:
-                data_dict, status = get_user_data_efficiently(usuario_alvo)
-                if status == "success":
-                    user_cache[usuario_alvo] = {
-                        'data': data_dict,
-                        'timestamp': current_time
-                    }
-                    logger.info(f"Usuário {usuario_alvo} cacheado com sucesso")
-            except Exception as e:
-                logger.error(f"Erro na busca de dados: {str(e)}")
-                # Return fallback only if database query fails
-                return quick_fallback()
+            # For Railway performance - return fallback immediately if not in cache
+            logger.info(f"Usuário {usuario_alvo} não está em cache - retornando fallback imediatamente")
+            return quick_fallback()
         
         if status == "user_not_found":
             logger.info(f"Usuário {usuario_alvo} não encontrado no banco de dados. Tentando adicionar...")

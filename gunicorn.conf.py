@@ -15,9 +15,9 @@ max_requests_jitter = 10
 preload_app = False  # Disabled to reduce memory usage
 
 # Timeout settings
-timeout = 10
+timeout = 5
 keepalive = 2
-graceful_timeout = 10
+graceful_timeout = 5
 
 # Logging
 accesslog = "-"
