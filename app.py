@@ -1,15 +1,9 @@
 import os
 import logging
-import pandas as pd
-import numpy as np
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import psycopg2
 from scrap import scrap, verify_letterboxd_user
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import TruncatedSVD
-from sklearn.metrics import silhouette_score
 from dotenv import load_dotenv
 import time
 import signal
@@ -34,9 +28,9 @@ host = os.getenv("PGHOST")
 port = os.getenv("PGPORT")
 
 # Timeout configuration
-REQUEST_TIMEOUT = 10  # seconds - even more aggressive for Railway
-MAX_USERS_FOR_CLUSTERING = 100
-MAX_MOVIES_FOR_PROCESSING = 50  # Much smaller dataset
+REQUEST_TIMEOUT = 5  # seconds - ultra aggressive for Railway
+MAX_USERS_FOR_CLUSTERING = 50
+MAX_MOVIES_FOR_PROCESSING = 10  # Minimal dataset
 
 # Rate limiting
 request_counts = defaultdict(list)
@@ -137,8 +131,37 @@ def memory_status():
             "memory_percent": process.memory_percent(),
             "cpu_percent": process.cpu_percent(),
             "cache_size": len(user_cache),
+            "cached_users": list(user_cache.keys()),
             "timestamp": time.time()
         })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route('/api/cache/<usuario>')
+def cache_user(usuario):
+    """Manually cache a user for faster recommendations"""
+    try:
+        logger.info(f"Tentando cachear usuário: {usuario}")
+        data_dict, status = get_user_data_efficiently(usuario)
+        
+        if status == "success":
+            user_cache[usuario] = {
+                'data': data_dict,
+                'timestamp': time.time()
+            }
+            return jsonify({
+                "status": "success",
+                "message": f"Usuário {usuario} cacheado com sucesso",
+                "cached_users": list(user_cache.keys())
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "message": f"Erro ao cachear usuário {usuario}: {status}"
+            }), 400
     except Exception as e:
         return jsonify({
             "status": "error",
@@ -187,12 +210,12 @@ def adicionar_usuario(usuario):
         return False
 
 def get_user_data_efficiently(usuario_alvo):
-    """Get user data more efficiently with limits"""
+    """Get user data using pure SQL - no pandas"""
     try:
         conn = get_db_connection()
-        
-        # First check if user exists - with timeout
         cursor = conn.cursor()
+        
+        # First check if user exists
         cursor.execute("SELECT id FROM users WHERE username = %s", (usuario_alvo,))
         user_exists = cursor.fetchone() is not None
         
@@ -200,7 +223,7 @@ def get_user_data_efficiently(usuario_alvo):
             conn.close()
             return None, "user_not_found"
         
-        # Get user's watched movies - with very strict limit
+        # Get user's top rated movies - pure SQL, no pandas
         query_user = """
         SELECT m.title, r.rating
         FROM ratings r
@@ -208,11 +231,12 @@ def get_user_data_efficiently(usuario_alvo):
         JOIN movies m ON r.movie_id = m.id
         WHERE u.username = %s
         ORDER BY r.rating DESC
-        LIMIT 30
+        LIMIT 20
         """
-        df_user = pd.read_sql(query_user, conn, params=(usuario_alvo,))
+        cursor.execute(query_user, (usuario_alvo,))
+        user_movies = cursor.fetchall()
         
-        # Get only top 10 popular movies - minimal dataset
+        # Get top 5 popular movies - minimal query
         query_popular = """
         SELECT m.title, AVG(r.rating) as avg_rating
         FROM ratings r
@@ -220,18 +244,19 @@ def get_user_data_efficiently(usuario_alvo):
         GROUP BY m.title
         HAVING COUNT(r.rating) >= 2
         ORDER BY AVG(r.rating) DESC
-        LIMIT 10
+        LIMIT 5
         """
-        df_popular = pd.read_sql(query_popular, conn, params=(10,))
+        cursor.execute(query_popular)
+        popular_movies = cursor.fetchall()
         
         conn.close()
         
-        if len(df_user) == 0:
+        if len(user_movies) == 0:
             return None, "insufficient_data"
             
         return {
-            'user_movies': df_user,
-            'popular_movies': df_popular
+            'user_movies': user_movies,
+            'popular_movies': popular_movies
         }, "success"
         
     except Exception as e:
@@ -239,29 +264,25 @@ def get_user_data_efficiently(usuario_alvo):
         return None, "error"
 
 def simple_recommendation_algorithm(data_dict, usuario_alvo):
-    """Ultra-simplified recommendation algorithm for Railway performance"""
+    """Ultra-simplified recommendation algorithm - pure Python, no pandas"""
     logger.info("Usando algoritmo ultra-simplificado de recomendação")
     
-    user_movies = data_dict['user_movies']
-    popular_movies = data_dict['popular_movies']
+    user_movies = data_dict['user_movies']  # List of tuples (title, rating)
+    popular_movies = data_dict['popular_movies']  # List of tuples (title, avg_rating)
     
-    # Get user's average rating
-    user_avg = user_movies['rating'].mean() if len(user_movies) > 0 else 3.0
+    # Calculate user's average rating
+    if len(user_movies) > 0:
+        user_avg = sum(movie[1] for movie in user_movies) / len(user_movies)
+    else:
+        user_avg = 3.0
     
     # Get user's watched movies
-    user_watched = set(user_movies['title'].tolist())
+    user_watched = set(movie[0] for movie in user_movies)
     
     recomendacoes = []
     
-    # Recommend from popular movies that user hasn't watched - limit to top 10
-    count = 0
-    for _, row in popular_movies.iterrows():
-        if count >= 10:  # Very limited recommendations
-            break
-            
-        title = row['title']
-        avg_rating = row['avg_rating']
-        
+    # Recommend from popular movies that user hasn't watched
+    for title, avg_rating in popular_movies:
         if title not in user_watched:
             # Very simple scoring
             score = float(avg_rating)
@@ -275,7 +296,6 @@ def simple_recommendation_algorithm(data_dict, usuario_alvo):
                 'filme': title,
                 'score': score
             })
-            count += 1
     
     return recomendacoes
 
@@ -312,25 +332,16 @@ def gerar_recomendacoes(usuario_alvo):
         }
     
     try:
-        # Check cache first
+        # Check cache first - if not in cache, return fallback immediately
         current_time = time.time()
         if usuario_alvo in user_cache and (current_time - user_cache[usuario_alvo]['timestamp']) < CACHE_EXPIRY:
             logger.info(f"Usando dados em cache para usuário: {usuario_alvo}")
             data_dict = user_cache[usuario_alvo]['data']
             status = "success"
         else:
-            # Try ultra-fast approach first
-            try:
-                data_dict, status = get_user_data_efficiently(usuario_alvo)
-                if status == "success":
-                    user_cache[usuario_alvo] = {
-                        'data': data_dict,
-                        'timestamp': current_time
-                    }
-            except Exception as e:
-                logger.error(f"Erro na busca de dados: {str(e)}")
-                # Return fallback immediately if database query fails
-                return quick_fallback()
+            # For Railway performance - return fallback immediately if not in cache
+            logger.info(f"Usuário {usuario_alvo} não está em cache - retornando fallback")
+            return quick_fallback()
         
         if status == "user_not_found":
             logger.info(f"Usuário {usuario_alvo} não encontrado no banco de dados. Tentando adicionar...")
@@ -391,7 +402,7 @@ def gerar_recomendacoes(usuario_alvo):
         
         # Sort and limit recommendations
         recomendacoes.sort(key=lambda x: x['score'], reverse=True)
-        recomendacoes_formatadas = {rec['filme']: rec['score'] for rec in recomendacoes[:5]}  # Only top 5
+        recomendacoes_formatadas = {rec['filme']: rec['score'] for rec in recomendacoes[:3]}  # Only top 3
         
         processing_time = time.time() - start_time
         logger.info(f"Recomendações geradas em {processing_time:.2f} segundos")
@@ -409,7 +420,8 @@ def gerar_recomendacoes(usuario_alvo):
                 "total_filmes": len(data_dict['popular_movies']) if 'data_dict' in locals() else 0,
                 "filmes_nao_vistos": len(recomendacoes_formatadas),
                 "total_recomendacoes": len(recomendacoes_formatadas),
-                "processing_time": processing_time
+                "processing_time": processing_time,
+                "mode": "ultra_fast"
             }
         }
         
