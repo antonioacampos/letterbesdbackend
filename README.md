@@ -1,38 +1,38 @@
-# Letterboxd Backend - Ultra-Optimized for Railway
+# Letterboxd Backend - ML-Powered Recommendations
 
-This is an **ultra-optimized** version of the Letterboxd recommendation backend designed to run efficiently on Railway without timeout or memory issues.
+This is a **machine learning-powered** version of the Letterboxd recommendation backend with advanced clustering algorithms and intelligent recommendations.
 
-## 🚀 **Ultra-Performance Optimizations**
+## 🧠 **ML-Powered Features**
 
-### 1. **Zero Dependencies on Heavy Libraries**
-- ❌ **Removed pandas** - Uses pure Python lists and SQL
-- ❌ **Removed numpy** - Uses built-in Python functions
-- ❌ **Removed scikit-learn** - Uses simple algorithms
-- ✅ **Pure Python + SQL** - Maximum performance
+### 1. **Advanced Machine Learning**
+- ✅ **Pandas** - Efficient data manipulation
+- ✅ **NumPy** - Numerical computations
+- ✅ **Scikit-learn** - KMeans clustering and SVD
+- ✅ **Intelligent clustering** - Groups users by taste
 
-### 2. **Aggressive Timeout Handling**
-- **5-second timeout** for recommendation generation
-- **10-second Gunicorn timeout**
-- **Immediate fallback** if not in cache
-- **No database queries** for uncached users
+### 2. **Intelligent Recommendation Algorithm**
+- **KMeans clustering** - Groups users by taste similarity
+- **SVD dimensionality reduction** - Optimizes performance
+- **Silhouette score** - Automatically finds optimal clusters
+- **Collaborative filtering** - Uses similar users' preferences
 
-### 3. **Ultra-Minimal Data Processing**
-- **Only 20 user movies** (top rated)
-- **Only 5 popular movies** for recommendations
-- **Only 3 final recommendations**
-- **Pure SQL queries** - no pandas overhead
+### 3. **Smart Data Processing**
+- **Full dataset analysis** - Uses all available data
+- **User clustering** - Groups users by rating patterns
+- **Matrix factorization** - Reduces computational complexity
+- **Intelligent scoring** - Considers both rating and popularity
 
-### 4. **Smart Caching System**
-- **5-minute cache** for user data
-- **Immediate fallback** for uncached users
-- **Manual cache endpoint** for pre-loading users
-- **Memory monitoring** endpoint
+### 4. **Advanced Caching System**
+- **5-minute cache** for processed data
+- **Pandas DataFrame caching** - Efficient data storage
+- **Memory optimization** - Cleans up after processing
+- **Rate limiting** - Prevents abuse
 
 ### 5. **Railway-Optimized Configuration**
-- **2 workers only** (reduced memory usage)
-- **No preload_app** (saves memory)
-- **Minimal worker connections**
-- **Aggressive timeouts**
+- **Single worker** - Optimized for ML operations
+- **Extended timeouts** - Allows for complex processing
+- **Memory management** - Handles large datasets
+- **Error handling** - Graceful degradation
 
 ## 🔗 **API Endpoints**
 
@@ -98,10 +98,10 @@ This will test all endpoints and measure response times.
 
 ## 📈 **Expected Performance**
 
-- **Cached users**: < 1 second
-- **Uncached users**: < 0.5 seconds (fallback)
-- **Memory usage**: < 100MB
-- **No timeouts**: Guaranteed response
+- **Cached users**: < 5 seconds
+- **First-time users**: < 20 seconds (with ML processing)
+- **Memory usage**: < 500MB (for ML operations)
+- **Timeout handling**: 20-second limit with graceful fallback
 
 ## 🛠️ **Troubleshooting**
 

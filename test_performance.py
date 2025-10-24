@@ -75,21 +75,21 @@ def main():
     except Exception as e:
         print(f"❌ Erro: {str(e)}")
     
-    # Teste 5: Debug user data
-    test_endpoint(f"{base_url}/api/debug/gutomp4", "Debug User Data (gutomp4)")
+    # Teste 5: Recommendations (ML-powered)
+    test_endpoint(f"{base_url}/api/recomendacoes/gutomp4", "ML Recommendations (gutomp4)")
     
-    # Teste 6: Recommendations (should be fast now)
-    test_endpoint(f"{base_url}/api/recomendacoes/gutomp4", "Recommendations (gutomp4)")
+    # Teste 6: Another user (ML-powered)
+    test_endpoint(f"{base_url}/api/recomendacoes/filmaria", "ML Recommendations (filmaria)")
     
-    # Teste 7: Another user (should return fallback)
-    test_endpoint(f"{base_url}/api/recomendacoes/filmaria", "Recommendations (filmaria - fallback)")
+    # Teste 7: Health check
+    test_endpoint(f"{base_url}/health", "Health Check")
     
     print(f"\n✅ Testes concluídos!")
     print(f"\n💡 Dicas:")
-    print(f"   - Se recommendations demorarem > 5s, há problema")
-    print(f"   - Se retornar fallback, usuário não está em cache")
-    print(f"   - Use /api/cache/<usuario> para cachear usuários")
-    print(f"   - Use /api/memory para monitorar uso de memória")
+    print(f"   - ML recommendations podem demorar até 20s na primeira vez")
+    print(f"   - Usuários cacheados respondem em < 5s")
+    print(f"   - Use /health para verificar status do sistema")
+    print(f"   - O sistema usa clustering ML para recomendações inteligentes")
 
 if __name__ == "__main__":
     main()

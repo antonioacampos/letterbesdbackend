@@ -6,3 +6,6 @@ beautifulsoup4==4.12.3
 requests==2.31.0
 gunicorn
 psutil==5.9.8
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.4.2
