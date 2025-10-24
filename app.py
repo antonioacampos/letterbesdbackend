@@ -1,45 +1,51 @@
 import os
 import logging
-from flask import Flask, jsonify, request
-from flask_cors import CORS
-import psycopg2
-from scrap import scrap, verify_letterboxd_user
-from dotenv import load_dotenv
 import time
 import signal
 from functools import wraps
 from collections import defaultdict
+
+import pandas as pd
+import numpy as np
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+import psycopg2
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import TruncatedSVD
+from sklearn.metrics import silhouette_score
 import psutil
+from dotenv import load_dotenv
 
-# Carrega .env no local
-load_dotenv()
+from scrap import scrap, verify_letterboxd_user
 
+# Setup logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# Load env vars
+load_dotenv()
+DB_NAME = os.getenv("PGDATABASE")
+DB_USER = os.getenv("PGUSER")
+DB_PASSWORD = os.getenv("PGPASSWORD")
+DB_HOST = os.getenv("PGHOST")
+DB_PORT = os.getenv("PGPORT")
+
+# Flask app setup
 app = Flask(__name__)
 CORS(app)
 
-# Variáveis de ambiente para banco
-dbname = os.getenv("PGDATABASE")
-user = os.getenv("PGUSER")
-password = os.getenv("PGPASSWORD")
-host = os.getenv("PGHOST")
-port = os.getenv("PGPORT")
-
-# Timeout configuration
-REQUEST_TIMEOUT = 3  # seconds - ultra aggressive for Railway
-MAX_USERS_FOR_CLUSTERING = 20
-MAX_MOVIES_FOR_PROCESSING = 5  # Minimal dataset
-
-# Rate limiting
-request_counts = defaultdict(list)
+# Rate limiting config
 RATE_LIMIT_WINDOW = 60  # seconds
-RATE_LIMIT_MAX_REQUESTS = 10  # max requests per window
+RATE_LIMIT_MAX_REQUESTS = 10
+request_counts = defaultdict(list)
 
-# Simple cache for user data
+# Cache config
 user_cache = {}
-CACHE_EXPIRY = 300  # 5 minutes
+CACHE_EXPIRY = 300  # seconds cache expiry
+
+# Timeout decorator for Railway-friendly execution
+REQUEST_TIMEOUT = 20  # seconds
 
 def timeout_handler(signum, frame):
     raise TimeoutError("Operation timed out")
@@ -48,12 +54,10 @@ def timeout_decorator(seconds):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            # Set the signal handler
             old_handler = signal.signal(signal.SIGALRM, timeout_handler)
             signal.alarm(seconds)
             try:
-                result = func(*args, **kwargs)
-                return result
+                return func(*args, **kwargs)
             finally:
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, old_handler)
@@ -61,208 +65,24 @@ def timeout_decorator(seconds):
     return decorator
 
 def get_db_connection():
+    logger.debug("Estabelecendo conexão com o banco de dados")
     return psycopg2.connect(
-        dbname=dbname,
-        user=user,
-        password=password,
-        host=host,
-        port=port
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        host=DB_HOST,
+        port=DB_PORT
     )
 
-@app.route('/ping')
-def ping():
-    return jsonify({"message": "pong"}), 200
-
-@app.route('/health')
-def health():
-    try:
-        # Test database connection
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT 1")
-        conn.close()
-        
-        return jsonify({
-            "status": "healthy",
-            "database": "connected",
-            "timestamp": time.time()
-        }), 200
-    except Exception as e:
-        return jsonify({
-            "status": "unhealthy",
-            "database": "disconnected",
-            "error": str(e),
-            "timestamp": time.time()
-        }), 500
-
-@app.route('/api/test/<usuario>')
-def test_user(usuario):
-    """Quick test endpoint that doesn't do heavy processing"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE username = %s", (usuario,))
-        user_exists = cursor.fetchone() is not None
-        conn.close()
-        
-        return jsonify({
-            "status": "success",
-            "user_exists": user_exists,
-            "username": usuario,
-            "message": "User check completed"
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e),
-            "username": usuario
-        }), 500
-
-@app.route('/api/memory')
-def memory_status():
-    """Check memory usage"""
-    try:
-        process = psutil.Process()
-        memory_info = process.memory_info()
-        
-        return jsonify({
-            "status": "success",
-            "memory_mb": memory_info.rss / 1024 / 1024,
-            "memory_percent": process.memory_percent(),
-            "cpu_percent": process.cpu_percent(),
-            "cache_size": len(user_cache),
-            "cached_users": list(user_cache.keys()),
-            "timestamp": time.time()
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
-
-@app.route('/api/cache/<usuario>')
-def cache_user(usuario):
-    """Manually cache a user for faster recommendations"""
-    try:
-        logger.info(f"Tentando cachear usuário: {usuario}")
-        data_dict, status = get_user_data_efficiently(usuario)
-        
-        if status == "success":
-            user_cache[usuario] = {
-                'data': data_dict,
-                'timestamp': time.time()
-            }
-            return jsonify({
-                "status": "success",
-                "message": f"Usuário {usuario} cacheado com sucesso",
-                "cached_users": list(user_cache.keys()),
-                "user_movies_count": len(data_dict['user_movies']),
-                "popular_movies_count": len(data_dict['popular_movies'])
-            })
-        else:
-            return jsonify({
-                "status": "error",
-                "message": f"Erro ao cachear usuário {usuario}: {status}"
-            }), 400
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
-
-@app.route('/api/debug/<usuario>')
-def debug_user(usuario):
-    """Debug endpoint to see user data and recommendations"""
-    try:
-        logger.info(f"Debug para usuário: {usuario}")
-        data_dict, status = get_user_data_efficiently(usuario)
-        
-        if status == "success":
-            # Get recommendations
-            recomendacoes = simple_recommendation_algorithm(data_dict, usuario)
-            
-            return jsonify({
-                "status": "success",
-                "username": usuario,
-                "user_movies": [{"title": movie[0], "rating": movie[1]} for movie in data_dict['user_movies']],
-                "popular_movies": [{"title": movie[0], "avg_rating": movie[1]} for movie in data_dict['popular_movies']],
-                "recommendations": recomendacoes,
-                "user_avg_rating": sum(movie[1] for movie in data_dict['user_movies']) / len(data_dict['user_movies']) if data_dict['user_movies'] else 0,
-                "total_user_movies": len(data_dict['user_movies']),
-                "total_popular_movies": len(data_dict['popular_movies'])
-            })
-        else:
-            return jsonify({
-                "status": "error",
-                "message": f"Erro ao buscar dados do usuário {usuario}: {status}"
-            }), 400
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
-
-@app.route('/api/preload')
-def preload_users():
-    """Preload common users into cache"""
-    common_users = ["gutomp4", "filmaria", "martinscorsese", "quentintarantino"]
-    results = []
-    
-    for user in common_users:
-        try:
-            logger.info(f"Preloadando usuário: {user}")
-            data_dict, status = get_user_data_efficiently(user)
-            if status == "success":
-                user_cache[user] = {
-                    'data': data_dict,
-                    'timestamp': time.time()
-                }
-                results.append({"user": user, "status": "success", "movies": len(data_dict['user_movies'])})
-            else:
-                results.append({"user": user, "status": "failed", "reason": status})
-        except Exception as e:
-            results.append({"user": user, "status": "error", "error": str(e)})
-    
-    return jsonify({
-        "status": "completed",
-        "results": results,
-        "cached_users": list(user_cache.keys())
-    })
-
-@app.route('/test-db-connection')
-def test_db_connection():
-    try:
-        conn = get_db_connection()
-        conn.close()
-        return jsonify({"status": "conectado com sucesso"}), 200
-    except Exception as e:
-        logger.error(f"Erro na conexão com banco: {str(e)}")
-        return jsonify({"status": "erro", "mensagem": str(e)}), 500
-
 def adicionar_usuario(usuario):
-    logger.info(f"Tentando adicionar usuário {usuario} ao banco de dados")
-    
-    # Check if user already exists first
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT id FROM users WHERE username = %s", (usuario,))
-            if cursor.fetchone():
-                logger.info(f"Usuário {usuario} já existe no banco de dados")
-                conn.close()
-                return True
-        conn.close()
-    except Exception as e:
-        logger.error(f"Erro ao verificar usuário {usuario}: {str(e)}")
-        return False
-    
+    logger.info(f"Tentando adicionar usuário {usuario} ao banco")
     if not verify_letterboxd_user(usuario):
         logger.error(f"Usuário {usuario} não existe no Letterboxd")
         return False
     try:
         conn = get_db_connection()
-        with conn.cursor() as cursor:
-            scrap(cursor, conn, usuario)
+        with conn.cursor() as cur:
+            scrap(cur, conn, usuario)
         conn.close()
         logger.info(f"Usuário {usuario} adicionado com sucesso")
         return True
@@ -270,334 +90,204 @@ def adicionar_usuario(usuario):
         logger.error(f"Erro ao adicionar usuário {usuario}: {str(e)}")
         return False
 
-def get_user_data_efficiently(usuario_alvo):
-    """Get user data with ultra-fast queries and fallback"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # First check if user exists - with timeout
-        cursor.execute("SELECT id FROM users WHERE username = %s LIMIT 1", (usuario_alvo,))
-        user_exists = cursor.fetchone() is not None
-        
-        if not user_exists:
-            conn.close()
-            return None, "user_not_found"
-        
-        # Get user's top rated movies - ultra minimal query
-        query_user = """
-        SELECT m.title, r.rating
-        FROM ratings r
-        JOIN users u ON r.user_id = u.id
-        JOIN movies m ON r.movie_id = m.id
-        WHERE u.username = %s
-        ORDER BY r.rating DESC
-        LIMIT 10
-        """
-        cursor.execute(query_user, (usuario_alvo,))
-        user_movies = cursor.fetchall()
-        
-        # Get only top 5 popular movies - minimal query
-        query_popular = """
-        SELECT m.title, AVG(r.rating) as avg_rating
-        FROM ratings r
-        JOIN movies m ON r.movie_id = m.id
-        GROUP BY m.title
-        HAVING COUNT(r.rating) >= 2
-        ORDER BY AVG(r.rating) DESC
-        LIMIT 5
-        """
-        cursor.execute(query_popular)
-        popular_movies = cursor.fetchall()
-        
-        conn.close()
-        
-        if len(user_movies) == 0:
-            return None, "insufficient_data"
-            
-        return {
-            'user_movies': user_movies,
-            'popular_movies': popular_movies
-        }, "success"
-        
-    except Exception as e:
-        logger.error(f"Erro ao buscar dados: {str(e)}")
-        return None, "error"
-
-def simple_recommendation_algorithm(data_dict, usuario_alvo):
-    """Smart recommendation algorithm - considers user's taste"""
-    logger.info("Usando algoritmo inteligente de recomendação")
-    
-    user_movies = data_dict['user_movies']  # List of tuples (title, rating)
-    popular_movies = data_dict['popular_movies']  # List of tuples (title, avg_rating)
-    
-    # Calculate user's average rating and preferences
-    if len(user_movies) > 0:
-        user_avg = sum(movie[1] for movie in user_movies) / len(user_movies)
-        user_ratings = [movie[1] for movie in user_movies]
-        # Check if user tends to rate high or low
-        high_rated = [r for r in user_ratings if r >= 4.0]
-        user_tendency = "high" if len(high_rated) > len(user_ratings) / 2 else "low"
-    else:
-        user_avg = 3.0
-        user_tendency = "neutral"
-    
-    # Get user's watched movies
-    user_watched = set(movie[0] for movie in user_movies)
-    
-    logger.info(f"Usuário {usuario_alvo}: média {user_avg:.2f}, tendência {user_tendency}, filmes vistos: {len(user_watched)}")
-    
-    recomendacoes = []
-    
-    # Recommend from popular movies that user hasn't watched
-    for title, avg_rating in popular_movies:
-        if title not in user_watched:
-            # Base score from average rating
-            score = float(avg_rating)
-            
-            # Bonus for movies with similar rating to user's average
-            rating_diff = abs(avg_rating - user_avg)
-            if rating_diff < 0.5:  # Very similar
-                score *= 1.2
-            elif rating_diff < 1.0:  # Similar
-                score *= 1.1
-            
-            # Bonus based on user's rating tendency
-            if user_tendency == "high" and avg_rating >= 4.0:
-                score *= 1.15
-            elif user_tendency == "low" and avg_rating <= 3.5:
-                score *= 1.1
-            
-            # Small bonus for highly rated movies
-            if avg_rating >= 4.5:
-                score *= 1.05
-            
-            recomendacoes.append({
-                'filme': title,
-                'score': score
-            })
-    
-    # Sort by score and return top recommendations
-    recomendacoes.sort(key=lambda x: x['score'], reverse=True)
-    
-    logger.info(f"Geradas {len(recomendacoes)} recomendações para {usuario_alvo}")
-    return recomendacoes
-
 @timeout_decorator(REQUEST_TIMEOUT)
 def gerar_recomendacoes(usuario_alvo):
     logger.info(f"Iniciando geração de recomendações para usuário: {usuario_alvo}")
     start_time = time.time()
-    
-    # Quick fallback for immediate response
-    def quick_fallback():
-            return {
-            "status": "success",
-            "message": "Recomendações rápidas geradas (modo de emergência)",
-            "recomendacoes": {
-                "The Shawshank Redemption": 9.3,
-                "The Godfather": 9.2,
-                "Pulp Fiction": 8.9,
-                "Fight Club": 8.8,
-                "Forrest Gump": 8.8,
-                "The Matrix": 8.7,
-                "Goodfellas": 8.7,
-                "The Silence of the Lambs": 8.6,
-                "Interstellar": 8.6,
-                "The Departed": 8.5
-            },
-                "metadata": {
-                "total_usuarios": 1,
-                "total_filmes": 10,
-                "filmes_nao_vistos": 10,
-                "total_recomendacoes": 10,
-                "processing_time": time.time() - start_time,
-                "mode": "fallback"
-            }
-        }
-    
-    # Ultra-fast user check with timeout
-    def quick_user_check(username):
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM users WHERE username = %s LIMIT 1", (username,))
-            exists = cursor.fetchone() is not None
-            conn.close()
-            return exists
-        except:
-            return False
-    
     try:
-        # Check cache first - if not in cache, return fallback immediately for Railway
+        # Check cache first
         current_time = time.time()
         if usuario_alvo in user_cache and (current_time - user_cache[usuario_alvo]['timestamp']) < CACHE_EXPIRY:
-            logger.info(f"Usando dados em cache para usuário: {usuario_alvo}")
-            data_dict = user_cache[usuario_alvo]['data']
-            status = "success"
+            logger.debug(f"Usando dados em cache para usuário {usuario_alvo}")
+            df = user_cache[usuario_alvo]['data']
         else:
-            # For Railway performance - return fallback immediately if not in cache
-            logger.info(f"Usuário {usuario_alvo} não está em cache - retornando fallback imediatamente")
-            return quick_fallback()
-        
-        if status == "user_not_found":
-            logger.info(f"Usuário {usuario_alvo} não encontrado no banco de dados. Tentando adicionar...")
+            conn = get_db_connection()
+            query = """
+                SELECT u.username, m.title, r.rating
+                FROM ratings r
+                JOIN users u ON r.user_id = u.id
+                JOIN movies m ON r.movie_id = m.id
+            """
+            logger.debug("Buscando avaliações no banco")
+            df = pd.read_sql(query, conn)
+            conn.close()
+            user_cache[usuario_alvo] = {'data': df, 'timestamp': time.time()}
+            logger.debug("Cache atualizado")
+
+        if df.empty or len(df) < 2:
+            logger.warning("Dados insuficientes para recomendações")
+            return {
+                "error": "Dados insuficientes para gerar recomendações",
+                "status": "insufficient_data",
+                "message": "É necessário pelo menos 2 usuários com avaliações",
+                "recomendacoes": {},
+                "metadata": {}
+            }
+
+        # Garantir que usuário está no banco
+        if usuario_alvo not in df['username'].unique():
+            logger.info(f"Usuário {usuario_alvo} não encontrado. Tentando adicionar...")
             if adicionar_usuario(usuario_alvo):
                 logger.info("Usuário adicionado com sucesso. Gerando recomendações...")
                 return gerar_recomendacoes(usuario_alvo)
             else:
-                logger.warning(f"Falha ao adicionar usuário {usuario_alvo}")
+                logger.warning(f"Falha comum ao adicionar usuário {usuario_alvo}")
                 return {
-                    "error": f"Usuário {usuario_alvo} não encontrado no Letterboxd ou erro ao adicionar",
+                    "error": f"Usuário {usuario_alvo} não encontrado no Letterboxd",
                     "status": "user_not_found",
-                    "message": "O usuário não foi encontrado no banco de dados ou não existe no Letterboxd. Verifique o nome.",
-                    "recomendacoes": {}, 
-                    "metadata": {
-                        "total_usuarios": 0,
-                        "total_filmes": 0,
-                        "filmes_nao_vistos": 0,
-                        "total_recomendacoes": 0,
-                        "processing_time": time.time() - start_time
-                    }
+                    "message": "Verifique o nome do usuário.",
+                    "recomendacoes": {}
                 }
-        
-        if status == "insufficient_data":
-            return {
-                "error": "Não há dados suficientes para gerar recomendações",
-                "status": "insufficient_data",
-                "message": "É necessário ter pelo menos 10 avaliações para gerar recomendações",
-                "recomendacoes": {},
-                "metadata": {
-                    "total_usuarios": 0,
-                    "total_filmes": 0,
-                    "filmes_nao_vistos": 0,
-                    "total_recomendacoes": 0,
-                    "processing_time": time.time() - start_time
-                }
-            }
-        
-        if status == "error" or data_dict is None:
-            return {
-                "error": "Erro ao buscar dados do banco",
-                "status": "error",
-                "message": "Ocorreu um erro ao buscar dados do banco de dados",
-                "recomendacoes": {},
-                "metadata": {
-                    "total_usuarios": 0,
-                    "total_filmes": 0,
-                    "filmes_nao_vistos": 0,
-                    "total_recomendacoes": 0,
-                    "processing_time": time.time() - start_time
-                }
-            }
 
-        logger.info(f"Total de filmes do usuário: {len(data_dict['user_movies'])}")
-        logger.info(f"Total de filmes populares: {len(data_dict['popular_movies'])}")
-        
-        # Debug: show user's movies
-        if len(data_dict['user_movies']) > 0:
-            logger.info(f"Filmes do usuário {usuario_alvo}: {[movie[0] for movie in data_dict['user_movies'][:5]]}")
-        logger.info(f"Filmes populares disponíveis: {[movie[0] for movie in data_dict['popular_movies'][:5]]}")
-        
-        # Use smart algorithm for better recommendations
-        recomendacoes = simple_recommendation_algorithm(data_dict, usuario_alvo)
-        
-        # Sort and limit recommendations
+        # Criar matriz usuário-filme
+        logger.debug("Criando matriz usuário-filme")
+        rating_matrix = df.pivot_table(index='username', columns='title', values='rating', fill_value=0)
+
+        filmes_usuario = set(df[df['username'] == usuario_alvo]['title'])
+        todos_filmes = set(df['title'])
+        filmes_nao_vistos = todos_filmes - filmes_usuario
+
+        logger.debug(f"Filmes não vistos pelo usuário: {len(filmes_nao_vistos)}")
+
+        # Pré-processamento e redução de dimensionalidade
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(rating_matrix)
+
+        n_components = min(30, X_scaled.shape[1] - 1)
+        if n_components > 0:
+            svd = TruncatedSVD(n_components=n_components, random_state=42)
+            X_reduced = svd.fit_transform(X_scaled)
+        else:
+            X_reduced = X_scaled
+
+        # Definir clusters automaticamente com KMeans e silhouette score
+        best_score = -1
+        best_k = 2
+        max_clusters = min(10, len(rating_matrix))
+        for k in range(2, max_clusters + 1):
+            km = KMeans(n_clusters=k, random_state=42, n_init=10)
+            labels = km.fit_predict(X_reduced)
+            score = silhouette_score(X_reduced, labels) if len(set(labels)) > 1 else -1
+            if score > best_score:
+                best_score = score
+                best_k = k
+
+        logger.info(f"Melhor número de clusters: {best_k}")
+
+        kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=20)
+        clusters = kmeans.fit_predict(X_reduced)
+        rating_matrix['cluster'] = clusters
+
+        cluster_usuario = rating_matrix.loc[usuario_alvo, 'cluster']
+        logger.info(f"Usuário {usuario_alvo} está no cluster {cluster_usuario}")
+
+        usuarios_cluster = rating_matrix[rating_matrix['cluster'] == cluster_usuario].index.tolist()
+        if len(usuarios_cluster) < 2:
+            logger.info("Poucos usuários no cluster, usando todos")
+            usuarios_cluster = rating_matrix.index.tolist()
+
+        # Calcular score para os filmes não vistos
+        recomendacoes = []
+        for filme in filmes_nao_vistos:
+            if filme in rating_matrix.columns:
+                avaliacoes = df[(df['title'] == filme) & (df['username'].isin(usuarios_cluster))]['rating']
+                if len(avaliacoes) == 0:
+                    continue
+                media = avaliacoes.mean()
+                count = len(avaliacoes)
+                score = media * (1 + 0.1 * count)
+                recomendacoes.append({'filme': filme, 'score': float(score)})
+
+        # Completar com filmes populares se necessário
         recomendacoes.sort(key=lambda x: x['score'], reverse=True)
-        recomendacoes_formatadas = {rec['filme']: rec['score'] for rec in recomendacoes[:5]}  # Top 5 recommendations
-        
+        if len(recomendacoes) < 10:
+            filmes_potenciais = [f for f in todos_filmes if f not in [r['filme'] for r in recomendacoes]]
+            populares = []
+            for filme in filmes_potenciais:
+                avaliacoes = df[df['title'] == filme]['rating']
+                if len(avaliacoes) == 0:
+                    continue
+                media = avaliacoes.mean()
+                count = len(avaliacoes)
+                populares.append({'filme': filme, 'score': media * (1 + 0.1 * count)})
+            populares.sort(key=lambda x: x['score'], reverse=True)
+            recomendacoes.extend(populares[:10 - len(recomendacoes)])
+
+        # Preparar resposta
+        top_recomendacoes = {r['filme']: r['score'] for r in recomendacoes[:10]}
+
         processing_time = time.time() - start_time
-        logger.info(f"Recomendações geradas em {processing_time:.2f} segundos")
-        
-        # Clean up memory
-        del data_dict
-        del recomendacoes
-        
-        response = {
+        logger.info(f"Recomendações geradas para {usuario_alvo} em {processing_time:.2f}s")
+
+        return {
             "status": "success",
             "message": "Recomendações geradas com sucesso",
-            "recomendacoes": recomendacoes_formatadas,
+            "recomendacoes": top_recomendacoes,
             "metadata": {
-                "total_usuarios": 1,  # Just the target user
-                "total_filmes": len(data_dict['popular_movies']) if 'data_dict' in locals() else 0,
-                "filmes_nao_vistos": len(recomendacoes_formatadas),
-                "total_recomendacoes": len(recomendacoes_formatadas),
-                "processing_time": processing_time,
-                "mode": "ultra_fast"
+                "total_usuarios": len(rating_matrix),
+                "total_filmes": len(todos_filmes),
+                "filmes_nao_vistos": len(filmes_nao_vistos),
+                "total_recomendacoes": len(top_recomendacoes),
+                "processing_time": processing_time
             }
         }
-        
-        return response
 
     except TimeoutError:
-        logger.error("Timeout ao gerar recomendações - usando fallback")
-        return quick_fallback()
+        logger.error("Timeout ao gerar recomendações")
+        return {
+            "status": "timeout",
+            "message": "Tempo excedido para gerar recomendações",
+            "recomendacoes": {},
+            "metadata": {}
+        }
     except Exception as e:
         logger.error(f"Erro ao gerar recomendações: {str(e)}")
         return {
-            "error": str(e),
             "status": "error",
-            "message": "Ocorreu um erro ao gerar as recomendações",
+            "message": str(e),
             "recomendacoes": {},
-            "metadata": {
-                "total_usuarios": 0,
-                "total_filmes": 0,
-                "filmes_nao_vistos": 0,
-                "total_recomendacoes": 0,
-                "processing_time": time.time() - start_time
-            }
+            "metadata": {}
         }
 
+
 @app.route('/api/recomendacoes/<usuario>')
-def obter_recomendacoes(usuario):
-    logger.info(f"Recebida requisição para usuário: {usuario}")
-    
-    # Simple rate limiting
+def api_recomendacoes(usuario):
+    logger.info(f"Requisição recebida para recomendações do usuário: {usuario}")
     current_time = time.time()
-    client_ip = request.remote_addr if hasattr(request, 'remote_addr') else 'unknown'
-    
-    # Clean old requests
-    request_counts[client_ip] = [req_time for req_time in request_counts[client_ip] 
-                                if current_time - req_time < RATE_LIMIT_WINDOW]
-    
-    # Check rate limit
+    client_ip = request.remote_addr or 'unknown'
+
+    # Rate limiting
+    request_counts[client_ip] = [t for t in request_counts[client_ip] if current_time - t < RATE_LIMIT_WINDOW]
     if len(request_counts[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
+        logger.warning(f"Rate limit excedido para IP {client_ip}")
         return jsonify({
-            "error": "Rate limit exceeded",
             "status": "rate_limited",
-            "message": "Too many requests. Please try again later.",
+            "message": "Muitas requisições, tente novamente mais tarde",
             "recomendacoes": {},
-            "metadata": {
-                "total_usuarios": 0,
-                "total_filmes": 0,
-                "filmes_nao_vistos": 0,
-                "total_recomendacoes": 0,
-                "processing_time": 0
-            }
+            "metadata": {}
         }), 429
-    
-    # Add current request
     request_counts[client_ip].append(current_time)
-    
+
+    recomendacoes = gerar_recomendacoes(usuario)
+    logger.debug(f"Recomendações enviadas para {usuario}: {recomendacoes}")
+    return jsonify(recomendacoes)
+
+
+@app.route('/health')
+def health_check():
+    logger.debug("Health check solicitado")
     try:
-        recomendacoes = gerar_recomendacoes(usuario)
-        logger.info(f"Resposta gerada: {recomendacoes}")
-        return jsonify(recomendacoes)
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute('SELECT 1')
+        conn.close()
+        return jsonify({"status": "healthy"})
     except Exception as e:
-        logger.error(f"Erro na rota de recomendações: {str(e)}")
-        return jsonify({
-            "error": str(e),
-            "status": "error",
-            "message": "Ocorreu um erro ao processar a requisição",
-            "recomendacoes": {},
-            "metadata": {
-                "total_usuarios": 0,
-                "total_filmes": 0,
-                "filmes_nao_vistos": 0,
-                "total_recomendacoes": 0,
-                "processing_time": 0
-            }
-        }), 500
+        logger.error(f"Health check falhou: {str(e)}")
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    logger.info(f"Iniciando aplicação na porta {port}")
     app.run(host='0.0.0.0', port=port, debug=True)
