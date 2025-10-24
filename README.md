@@ -1,6 +1,6 @@
-# Letterboxd Backend - ML-Powered Recommendations
+# Letterboxd Backend - ML-Powered Recommendations (File-Based)
 
-This is a **machine learning-powered** version of the Letterboxd recommendation backend with advanced clustering algorithms and intelligent recommendations.
+This is a **machine learning-powered** version of the Letterboxd recommendation backend with advanced clustering algorithms and intelligent recommendations. **No database required** - uses JSON files for data storage!
 
 ## 🧠 **ML-Powered Features**
 
@@ -28,11 +28,11 @@ This is a **machine learning-powered** version of the Letterboxd recommendation 
 - **Memory optimization** - Cleans up after processing
 - **Rate limiting** - Prevents abuse
 
-### 5. **Railway-Optimized Configuration**
-- **Single worker** - Optimized for ML operations
-- **Extended timeouts** - Allows for complex processing
-- **Memory management** - Handles large datasets
-- **Error handling** - Graceful degradation
+### 5. **File-Based Storage**
+- **No database required** - Uses JSON files
+- **Easy deployment** - No PostgreSQL setup needed
+- **Persistent data** - Data survives restarts
+- **Railway-friendly** - No external dependencies
 
 ## 🔗 **API Endpoints**
 
@@ -60,14 +60,28 @@ This is a **machine learning-powered** version of the Letterboxd recommendation 
 4. **`gunicorn.conf.py`** - Optimized Gunicorn settings
 5. **`start.sh`** - Database connection retry logic
 
-### **Environment Variables**
+### **No Environment Variables Required!**
+The system uses JSON files for data storage, so no database configuration is needed.
+
+### **Initial Data Setup**
+Run the data population script to scrape real data from Letterboxd using your existing `scrap.py`:
+```bash
+python populate_data.py
 ```
-PGDATABASE=your_database
-PGUSER=your_user
-PGPASSWORD=your_password
-PGHOST=your_host
-PGPORT=your_port
+
+Or use the API endpoint to populate data:
+```bash
+POST /populate
 ```
+
+This will use the same scraping logic from your `scrap.py` file to get real movie ratings from these Letterboxd profiles:
+- gutomp4
+- filmaria
+- martinscorsese
+- quentintarantino
+- wesanderson
+
+**Note**: The system uses your existing `scrap.py` functions (`verify_letterboxd_user` and scraping logic) but saves data to JSON files instead of PostgreSQL.
 
 ## 📊 **Performance Testing**
 

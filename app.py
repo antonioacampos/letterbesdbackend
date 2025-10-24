@@ -9,7 +9,6 @@ import pandas as pd
 import numpy as np
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import psycopg2
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import TruncatedSVD
@@ -18,6 +17,7 @@ import psutil
 from dotenv import load_dotenv
 
 from scrap import scrap, verify_letterboxd_user
+from data_manager import DataManager
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -25,11 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Load env vars
 load_dotenv()
-DB_NAME = os.getenv("PGDATABASE")
-DB_USER = os.getenv("PGUSER")
-DB_PASSWORD = os.getenv("PGPASSWORD")
-DB_HOST = os.getenv("PGHOST")
-DB_PORT = os.getenv("PGPORT")
+
+# Initialize data manager (uses JSON files instead of PostgreSQL)
+data_manager = DataManager()
 
 # Flask app setup
 app = Flask(__name__)
@@ -65,27 +63,29 @@ def timeout_decorator(seconds):
     return decorator
 
 def get_db_connection():
-    logger.debug("Estabelecendo conexão com o banco de dados")
-    return psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
+    """Legacy function - now uses DataManager"""
+    logger.debug("Using DataManager instead of PostgreSQL")
+    return data_manager
 
 def adicionar_usuario(usuario):
-    logger.info(f"Tentando adicionar usuário {usuario} ao banco")
+    logger.info(f"Tentando adicionar usuário {usuario} ao sistema")
     if not verify_letterboxd_user(usuario):
         logger.error(f"Usuário {usuario} não existe no Letterboxd")
         return False
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            scrap(cur, conn, usuario)
-        conn.close()
-        logger.info(f"Usuário {usuario} adicionado com sucesso")
-        return True
+        # Add user to data manager
+        user_id = data_manager.add_user(usuario)
+        logger.info(f"Usuário {usuario} adicionado com ID {user_id}")
+        
+        # Use the existing scrap function logic but adapt for DataManager
+        from populate_data import scrape_user_data
+        if scrape_user_data(data_manager, usuario):
+            logger.info(f"Usuário {usuario} adicionado com dados reais do Letterboxd")
+            return True
+        else:
+            logger.warning(f"Falha ao fazer scraping do usuário {usuario}, mas usuário foi adicionado")
+            return True  # User was added, just no data scraped
+        
     except Exception as e:
         logger.error(f"Erro ao adicionar usuário {usuario}: {str(e)}")
         return False
@@ -101,16 +101,11 @@ def gerar_recomendacoes(usuario_alvo):
             logger.debug(f"Usando dados em cache para usuário {usuario_alvo}")
             df = user_cache[usuario_alvo]['data']
         else:
-            conn = get_db_connection()
-            query = """
-                SELECT u.username, m.title, r.rating
-                FROM ratings r
-                JOIN users u ON r.user_id = u.id
-                JOIN movies m ON r.movie_id = m.id
-            """
-            logger.debug("Buscando avaliações no banco")
-            df = pd.read_sql(query, conn)
-            conn.close()
+            logger.debug("Buscando avaliações no DataManager")
+            all_ratings = data_manager.get_all_ratings()
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(all_ratings, columns=['username', 'title', 'rating'])
             user_cache[usuario_alvo] = {'data': df, 'timestamp': time.time()}
             logger.debug("Cache atualizado")
 
@@ -124,14 +119,14 @@ def gerar_recomendacoes(usuario_alvo):
                 "metadata": {}
             }
 
-        # Garantir que usuário está no banco
-        if usuario_alvo not in df['username'].unique():
+        # Garantir que usuário está no sistema
+        if not data_manager.user_exists(usuario_alvo):
             logger.info(f"Usuário {usuario_alvo} não encontrado. Tentando adicionar...")
             if adicionar_usuario(usuario_alvo):
                 logger.info("Usuário adicionado com sucesso. Gerando recomendações...")
                 return gerar_recomendacoes(usuario_alvo)
             else:
-                logger.warning(f"Falha comum ao adicionar usuário {usuario_alvo}")
+                logger.warning(f"Falha ao adicionar usuário {usuario_alvo}")
                 return {
                     "error": f"Usuário {usuario_alvo} não encontrado no Letterboxd",
                     "status": "user_not_found",
@@ -277,14 +272,32 @@ def api_recomendacoes(usuario):
 def health_check():
     logger.debug("Health check solicitado")
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute('SELECT 1')
-        conn.close()
-        return jsonify({"status": "healthy"})
+        stats = data_manager.get_stats()
+        return jsonify({
+            "status": "healthy",
+            "data_manager": "working",
+            "stats": stats
+        })
     except Exception as e:
         logger.error(f"Health check falhou: {str(e)}")
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
+@app.route('/populate', methods=['POST'])
+def populate_data():
+    """Populate initial data"""
+    try:
+        from populate_data import populate_initial_data
+        populate_initial_data()
+        return jsonify({
+            "status": "success",
+            "message": "Data populated successfully"
+        })
+    except Exception as e:
+        logger.error(f"Error populating data: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 
 if __name__ == '__main__':

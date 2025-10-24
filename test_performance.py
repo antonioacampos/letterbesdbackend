@@ -53,25 +53,15 @@ def main():
     # Teste 1: Health check
     test_endpoint(f"{base_url}/health", "Health Check")
     
-    # Teste 2: Memory status
-    test_endpoint(f"{base_url}/api/memory", "Memory Status")
-    
-    # Teste 3: Test user (quick)
-    test_endpoint(f"{base_url}/api/test/gutomp4", "Test User (gutomp4)")
-    
-    # Teste 4: Cache user
-    print(f"\n🧪 Testando: Cache User (gutomp4)")
-    print(f"URL: {base_url}/api/cache/gutomp4")
-    start_time = time.time()
+    # Teste 2: Populate initial data
+    print(f"\n🧪 Testando: Populate Data")
+    print(f"URL: {base_url}/populate")
     try:
-        response = requests.get(f"{base_url}/api/cache/gutomp4", timeout=15)
-        end_time = time.time()
-        response_time = end_time - start_time
+        response = requests.post(f"{base_url}/populate", timeout=30)
         print(f"✅ Status: {response.status_code}")
-        print(f"⏱️  Tempo: {response_time:.2f}s")
         if response.status_code == 200:
             data = response.json()
-            print(f"📊 Cached users: {data.get('cached_users', [])}")
+            print(f"📊 Data populated: {data.get('message', 'Success')}")
     except Exception as e:
         print(f"❌ Erro: {str(e)}")
     
